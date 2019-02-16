@@ -1,0 +1,504 @@
+#Contributions by:
+#Alice Castrucci, Danesh Gilani. Johannes Breitschwerdt, Jose Alvarez
+
+#Import all libraries for this notebook
+import pandas as pd
+import numpy as np
+
+from sklearn import model_selection
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import normalize
+
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+
+from sklearn.utils import shuffle
+from sklearn.model_selection import KFold
+from imblearn.under_sampling import RandomUnderSampler
+
+from sklearn.model_selection import cross_val_predict
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import confusion_matrix
+
+import scikitplot as skplt
+from sklearn.metrics import roc_curve,auc
+import matplotlib.pylab as plt
+from scipy import interp
+
+from sklearn.linear_model import Lasso
+
+import warnings
+warnings.filterwarnings('ignore')
+
+#Load data
+df = pd.read_csv('Loan_data_part_I.csv')
+
+#Make loan_status binary: current = 0, fail = 1
+df['loan_status'] = df['loan_status'].replace(['Current', 'Fail'], [0, 1])
+df = df.drop(['id'], axis = 1) #drop id from dataframe
+
+#Return the number of default in the data
+nrows = len(df)
+df_fail = df['loan_status'].sum()
+print('There are', nrows, 'rows in this dataset, with', df_fail, 'or', round(df_fail/nrows*100,2), '% \'loan_status = fail\'')
+#There are 61072 rows in this dataset, with 9666 or 15.83 % 'loan_status = fail'
+
+#Check each column for "null" values
+print('There are', sum(df.isnull().sum()), 'instances of missing data in all', len(df.columns), 'columns')
+#There are 0 instances of missing data in all 47 columns
+
+#Convert categorical columns to binary
+df_dum = pd.get_dummies(df, columns = ['home_ownership', 'purpose', 'verification_status'], drop_first = True)
+
+#Shuffle data frame
+df_s = shuffle(df_dum) 
+
+#Separate dependent (y) and independent (X) variables
+X = np.array(df_s[df_s.columns[1:]])
+y = np.array(df_s['loan_status'])
+
+#Scale all independent variables using Z-Score normalisation
+z_scaler = StandardScaler().fit(X)
+X_sc = z_scaler.transform(X)
+
+#Initialize kfold cross validation (k = 10)
+k = 10
+kfold = model_selection.KFold(n_splits = k, shuffle = False)
+
+#Run LDA classifier using kfold cross validation on the z score scaled data
+LDA = LinearDiscriminantAnalysis()
+score_LDA = model_selection.cross_val_score(LDA, X_sc, y, cv = kfold)
+mean_score_LDA = score_LDA.mean()
+print('The LDA full model accuracy is %s%%\n' %round(mean_score_LDA*100, 2))
+#The LDA full model accuracy is 84.03%
+
+#Create confusion matrix using kfold cross validation
+pred_LDA = cross_val_predict(LDA, X_sc, y, cv = kfold)
+conf = confusion_matrix(y, pred_LDA)
+conf_LDA = conf.transpose()
+conf_LDA = normalize(conf_LDA, axis=0, norm='l1')
+conf_LDA = pd.DataFrame(conf_LDA, index = ['Pred \'Current\'', 'Pred \'Fail\''],
+                            columns = ['Act \'Current\'', 'Act \'Fail\''])
+
+print(conf_LDA)
+
+
+#Find optimal tree depth
+tree_cv_scores = []
+
+for i in range(1, 10): 
+    tree = DecisionTreeClassifier(max_depth = i)
+    scores = model_selection.cross_val_score(tree, X, y, cv = kfold) 
+    tree_cv_scores.append(scores.mean())
+    
+opt_depth = tree_cv_scores.index(max(tree_cv_scores)) + 1
+print('Optimal tree depth:', opt_depth)
+#Optimal tree depth: 4
+
+#Build tree using kfold cross validation and optimal tree depth = 3 on unscaled data
+tree_opt = DecisionTreeClassifier(max_depth = opt_depth)
+tree_scores = model_selection.cross_val_score(tree_opt, X, y, cv = kfold)
+mean_score_tree = tree_scores.mean()
+print('The Tree full model accuracy is %s%%\n' %round(mean_score_tree*100, 2))
+#The Tree full model accuracy is 84.3%
+
+#Create confusion matrix using kfold cross validation
+pred_tree = cross_val_predict(tree_3, X, y, cv=kfold)
+conf = confusion_matrix(y, pred_tree)
+conf_tree = conf.transpose()
+conf_tree = normalize(conf_tree, axis=0, norm='l1')
+conf_tree = pd.DataFrame(conf_tree, index = ['Pred \'Current\'', 'Pred \'Fail\''],
+                            columns = ['Act \'Current\'', 'Act \'Fail\''])
+
+print(conf_tree)
+
+#Initialize and Score KNN classifier in-sample using kfold cross validation on scaled data
+neigh = 5
+knn = KNeighborsClassifier(n_neighbors = neigh)
+knn_scores = model_selection.cross_val_score(knn, X_sc, y, cv = kfold)
+mean_scores_knn = knn_scores.mean()
+print('The KNN full model accuracy is %s%%\n' %round(mean_scores_knn*100, 2))
+#The KNN full model accuracy is 82.92%
+
+#Create confusion matrix using kfold cross validation
+pred_knn = cross_val_predict(knn, X_sc, y, cv = kfold)
+conf = confusion_matrix(y, pred_knn)
+conf_knn = conf.transpose()
+conf_knn = normalize(conf_knn, axis=0, norm='l1')
+conf_knn = pd.DataFrame(conf_knn, index = ['Pred \'Current\'', 'Pred \'Fail\''],
+                            columns = ['Act \'Current\'', 'Act \'Fail\''])
+
+print(conf_knn)
+
+#Define function to allow classifier to properly oversample only training data in kfold cross validation 
+def classifier(classifier_type, X, y):
+    kfold = KFold(n_splits = k, random_state = 42)
+    kfold.get_n_splits(X)
+
+    score_list = []
+    best_score = 0
+
+    conf_matrix = np.zeros((2, 2))
+
+    for train_index, valid_index in kfold.split(X):
+        #Split training / validation set at Kth fold
+        X_train, X_valid = X[train_index], X[valid_index]
+        y_train, y_valid = y[train_index], y[valid_index]
+        
+        #Undersample training data
+        rus = RandomUnderSampler(random_state = 42)
+        X_res, y_res = rus.fit_resample(X_train, y_train)
+        
+        #Scale undersampled training set and validation set, using scale fit from training data
+        scaler = StandardScaler().fit(X_res)
+        X_train_scaled = scaler.transform(X_res)
+        X_valid_scaled = scaler.transform(X_valid)
+    
+        #Create classifier object
+        clf = classifier_type
+        clf.fit(X_train_scaled, y_res)
+        score = clf.score(X_valid_scaled, y_valid)
+        score_list.append(score)
+        
+        #Set best score
+        if score > best_score:
+            best_train_index = train_index
+            best_valid_index = valid_index
+                               
+        #Create confusion matrix for fold k
+        conf = confusion_matrix(y_valid, clf.predict(X_valid_scaled))
+    
+        #Iteratively add confusion matrix to previous
+        conf_matrix[0][0] += conf[0][0]
+        conf_matrix[0][1] += conf[0][1]
+        conf_matrix[1][0] += conf[1][0]
+        conf_matrix[1][1] += conf[1][1]
+
+
+    conf_clf = conf_matrix.transpose()
+    conf_clf = normalize(conf_clf, axis = 0, norm = 'l1')
+    conf_clf = pd.DataFrame(conf_clf, index = ['Pred \'Current\'', 'Pred \'Fail\''],
+                                columns = ['Act \'Current\'', 'Act \'Fail\''])
+    avg_accuracy = sum(score_list) / len(score_list)
+    avg_accuracy
+    
+    return conf_clf, avg_accuracy
+
+#Run LDA on undersampled data and return accuracy
+conf_LDA_us, score_LDA_us = classifier(LinearDiscriminantAnalysis(), X, y)
+print('The accuracy of the LDA model with undersampling is %s%%\n' %round((score_LDA_us*100),2))
+#The accuracy of the LDA model with undersampling is 66.13%
+
+#Return confidence matrix for LDA on undersampled data
+print(conf_LDA_us)
+
+#Run tree on undersampled data and return accuracy
+conf_tree_us, score_tree_us = classifier(DecisionTreeClassifier(), X, y)
+print('The accuracy of the tree model with undersampling is %s%%\n' %round((score_tree_us*100),2))
+#The accuracy of the tree model with undersampling is 56.65%
+
+#Return confidence matrix for tree on undersampled data
+print(conf_tree_us)
+
+#Run 5-NN on undersampled data and return accuracy
+conf_knn_us, score_knn_us = classifier(KNeighborsClassifier(n_neighbors = neigh), X, y)
+print('The accuracy of the 5-NN model with undersampling is %s%%\n' %round((score_knn_us*100),2))
+#The accuracy of the 5-NN model with undersampling is 61.8%
+
+#Return confidence matrix for 5-NN on undersampled data
+print(conf_knn_us)
+
+#Features chosen based on intuition
+features = ['annual_inc', 'avg_cur_bal', 'delinq_2yrs', 'inq_last_6mths', 'installment', 
+            'grade', 'tot_hi_cred_lim', 'dti', 'revol_bal', 'total_bal_ex_mort']
+
+#Create new reduced dependent (y) and independent (X) variables
+red_columns = features
+X_reduced = np.array(df_s[red_columns])
+y_reduced = np.array(df_s['loan_status'])
+
+#Run Logit on reduced model and return accuracy
+logit = LogisticRegression(solver = 'lbfgs')
+conf_log_red, score_log_red = classifier(logit, X_reduced, y_reduced)
+print('The accuracy of the logistic regression model is %s%%\n' %round((score_log_red*100),2))
+#The accuracy of the logistic regression model is 66.64%
+
+#Return confidence matrix for Logit on reduced model
+print(conf_log_red)
+
+#Run Tree on reduced model and return accuracy
+conf_tree_red, score_tree_red = classifier(DecisionTreeClassifier(), X_reduced, y_reduced)
+print('The accuracy of the reduced tree model is %s%%\n' %round((score_tree_red*100),2))
+#The accuracy of the reduced tree model is 56.19%
+
+#Return confidence matrix for Tree on reduced model
+print(conf_tree_red)
+
+#Run 5-NN on reduced model and return accuracy
+conf_knn_red, score_knn_red = classifier(KNeighborsClassifier(n_neighbors = neigh), X_reduced, y_reduced)
+print('The accuracy of the 5-NN reduced model is %s%%\n' %round((score_knn_red*100),2))
+#The accuracy of the 5-NN reduced model is 59.47%
+
+#Return confidence matrix for 5-NN on reduced model
+print(conf_knn_red)
+
+#Define function to draw ROC curve for each iteration through kfold cross validation, and mean ROC curv
+# ROC FUNCTION BELOW IS BORROWS HEAVILY FROM FOLLOWING KERNEL:
+# Title: ROC Curve with k-Fold CV
+# Author: DATAI Group
+# Date: NA
+# Code version: NA
+# Availability: https://www.kaggle.com/kanncaa1/roc-curve-with-k-fold-cv
+
+def draw_ROC(classifier_type, X, y):
+    kfold = KFold(n_splits = k, random_state = 42)
+    kfold.get_n_splits(X)
+
+    fig1 = plt.figure(figsize = [9, 9])
+    ax1 = fig1.add_subplot(111, aspect = 'equal')
+
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
+
+    i = 1
+    for train_index, valid_index in kfold.split(X):
+        #Split training / validation set at Kth fold
+        X_train, X_valid = X[train_index], X[valid_index]
+        y_train, y_valid = y[train_index], y[valid_index]
+
+        #Undersample training data
+        rus = RandomUnderSampler(random_state = 42)
+        X_res, y_res = rus.fit_resample(X_train, y_train)
+
+        #Scale undersampled training set and validation set, using scale fit from training data
+        scaler = StandardScaler().fit(X_res)
+        X_train_scaled = scaler.transform(X_res)
+        X_valid_scaled = scaler.transform(X_valid)
+        
+        #Fit classifier to scaled data and undersampled data
+        clf = classifier_type.fit(X_train_scaled, y_res)
+        
+        #Predict using classifier and plot respective ROC curve
+        prediction = clf.predict_proba(X_valid_scaled)
+        fpr, tpr, t = roc_curve(y_valid, prediction[:, 1])
+        tprs.append(interp(mean_fpr, fpr, tpr))
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        plt.plot(fpr, tpr, lw = 2, alpha = 0.3, label = 'ROC fold %d (AUC = %0.2f)' %(i, roc_auc))
+        i= i+1
+    
+    #Calculate and plot mean ROC curve
+    plt.plot([0,1],[0,1], linestyle = '--', lw = 2, color = 'black')
+    mean_tpr = np.mean(tprs, axis = 0)
+    mean_auc = auc(mean_fpr, mean_tpr)
+    plt.plot(mean_fpr, mean_tpr, color = 'blue',\
+             label = r'Mean ROC (AUC = %0.2f )' % (mean_auc), lw = 2, alpha = 1)
+    
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC')
+    plt.legend(loc = "lower right")
+    plt.show()
+
+#Plot ROC curve for LDA
+ROC_LDA = draw_ROC(LinearDiscriminantAnalysis(), X_reduced, y_reduced)
+
+#Plot ROC curve for 5-NN
+ROC_knn = draw_ROC(KNeighborsClassifier(n_neighbors = neigh), X_reduced, y_reduced)
+
+def lasso_classifier(classifier_type, X, y):
+    kfold = KFold(n_splits = k, random_state = 42)
+    kfold.get_n_splits(X)
+
+    score_list = []
+    best_score = 0
+
+    conf_matrix = np.zeros((2,2))
+
+    for train_index, valid_index in kfold.split(X):
+        #Split training / validation set at Kth fold
+        X_train, X_valid = X[train_index], X[valid_index]
+        y_train, y_valid = y[train_index], y[valid_index]
+        
+        #Undersample training data
+        rus = RandomUnderSampler(random_state=42)
+        X_res, y_res = rus.fit_resample(X_train, y_train)
+        
+        #Scale undersampled training set and validation set, using scale fit from training data
+        scaler = StandardScaler().fit(X_res)
+        X_train_scaled = scaler.transform(X_res)
+        X_valid_scaled = scaler.transform(X_valid)
+    
+        #Create classifier object
+        clf = classifier_type
+        clf.fit(X_train_scaled, y_res)
+        score = clf.score(X_valid_scaled, y_valid)
+        score_list.append(score)
+        
+        y_pred_lasso = clf.predict(X_valid_scaled)
+        
+        y_pred_lasso_2 = []
+        for i in range(len(y_pred_lasso)):
+            if y_pred_lasso[i] >= 0.5:
+                y_pred_lasso_2.append(1)
+            else:
+                y_pred_lasso_2.append(0) 
+        
+        #Create confusion matrix for fold k
+        conf = confusion_matrix(y_valid, y_pred_lasso_2)
+    
+        #Iteratively add confusion matrix to the previous
+        conf_matrix[0][0] += conf[0][0]
+        conf_matrix[0][1] += conf[0][1]
+        conf_matrix[1][0] += conf[1][0]
+        conf_matrix[1][1] += conf[1][1]
+
+
+    conf_clf = conf_matrix.transpose()
+    conf_clf = normalize(conf_clf, axis = 0, norm = 'l1')
+    conf_clf = pd.DataFrame(conf_clf, index = ['Pred \'Current\'', 'Pred \'Fail\''],
+                                columns = ['Act \'Current\'', 'Act \'Fail\''])
+    
+    avg_accuracy = sum(score_list) / len(score_list)
+    avg_accuracy
+    
+    return conf_clf, avg_accuracy
+
+#Run lasso model and return confusion matrix
+conf_lasso, score_lasso = lasso_classifier(Lasso(alpha = 0.1), X, y)
+
+#Find the value for alpha which yields 10 coefs
+lam = [0.010, 0.012, 0.016, 0.0168, 0.017, 0.018, 0.05, 0.1, 0.5, 1]
+
+rus_lasso = RandomUnderSampler(random_state = 42)
+X_res_lasso, y_res_lasso = rus_lasso.fit_resample(X, y)
+
+scaler = StandardScaler().fit(X_res_lasso)
+X_train_lasso = scaler.transform(X_res_lasso)
+
+for i in lam:
+    lasso = Lasso(alpha = i)
+    lasso.fit(X_train_lasso, y_res_lasso)
+    
+    coeffs = lasso.coef_
+    
+    b = 0
+    for j in range(len(coeffs)):
+        if coeffs[j] != 0:
+            b += 1
+            
+    print('A lambda of ' + str(i) + ' leaves the model with ' + str(b) + ' variables')
+    if b == 10:
+        lamb = i
+
+#A lambda of 0.01 leaves the model with 16 variables
+#A lambda of 0.012 leaves the model with 15 variables
+#A lambda of 0.016 leaves the model with 12 variables
+#A lambda of 0.0168 leaves the model with 10 variables
+#A lambda of 0.017 leaves the model with 9 variables
+#A lambda of 0.018 leaves the model with 8 variables
+#A lambda of 0.05 leaves the model with 1 variables
+#A lambda of 0.1 leaves the model with 1 variables
+#A lambda of 0.5 leaves the model with 0 variables
+#A lambda of 1 leaves the model with 0 variables
+
+#Based on redults above, we have 10 variables when lambda = 0.0168
+lasso_model = Lasso(alpha = lamb)
+
+lasso_model.fit(X_train_lasso, y_res_lasso)
+
+lasso_model_coef = list(lasso_model.coef_)
+
+all_features = list(df_s[df_s.columns[1:]])
+select_features = []
+
+for i in range(len(lasso_model_coef)):
+    if lasso_model_coef[i] != 0:
+        select_features.append(all_features[i])
+        
+lasso_model_features = pd.DataFrame(select_features, columns = ['Features'])
+lasso_model_features
+
+#Define the final set of features and run LDA model using this final reduced dataset
+final_features = ['sub_grade', 'installment', 'fico_range_high', 'inq_last_6mths', 'open_rv_24m',\
+                  'total_bc_limit', 'home_ownership_1', 'annual_inc', 'emp_length', 'total_bal_ex_mort']
+
+X_reduced_final = np.array(df_s[final_features])
+
+conf_final, score_final = classifier(LinearDiscriminantAnalysis(), X_reduced_final, y)
+print('The accuracy of the final model is %s%%\n' %round((score_final*100),2))
+#The accuracy of the final model is 66.45%
+
+#Return confustion matrix for the final model
+print(conf_final)
+
+#Load data for Part 2
+df2 = pd.read_csv('Loan_data_part_II.csv')
+
+#Make loan_status binary: current = 0, fail = 1
+df2['loan_status'] = df2['loan_status'].replace(['Current', 'Fail'], [0, 1])
+df2 = df2.drop(['id'], axis = 1)
+
+#Convert categorical columns to binary
+df2 = pd.get_dummies(df2, columns = ['home_ownership', 'purpose', 'verification_status'])
+
+#Split independant and dependant variables into x_test and y_test
+X_test = np.array(df2[df2.columns[1:]])
+y_test = np.array(df2['loan_status'])
+
+#Reduce test set based on final selected features
+X_test_red = np.array(df2[final_features])
+
+#Define function to draw ROC curve for the test dataset
+# ROC FUNCTION BELOW IS BORROWS HEAVILY FROM FOLLOWING KERNEL:
+# Title: ROC Curve with k-Fold CV
+# Author: DATAI Group
+# Date: NA
+# Code version: NA
+# Availability: https://www.kaggle.com/kanncaa1/roc-curve-with-k-fold-cv
+
+def draw_test_ROC(classifier_type, X_train, y_train, X_test, y_test):
+    fig1 = plt.figure(figsize = [9, 9])
+    ax1 = fig1.add_subplot(111, aspect = 'equal')
+
+    #Undersample training data
+    rus = RandomUnderSampler(random_state = 42)
+    X_res, y_res = rus.fit_resample(X_train, y_train)
+
+    ##Scale undersampled training set and validation set, using scale fit from training data
+    scaler = StandardScaler().fit(X_res)
+    X_train_scaled = scaler.transform(X_res)
+    X_test_scaled = scaler.transform(X_test)
+
+    clf = classifier_type.fit(X_train_scaled, y_res)
+        
+    prediction = clf.predict_proba(X_test_scaled)
+    fpr, tpr, t = roc_curve(y_test, prediction[:, 1])
+    roc_auc = auc(fpr, tpr)   
+    plt.plot([0, 1], [0, 1], linestyle = '--', lw = 2, color = 'black')
+    plt.plot(fpr, tpr, color = 'blue',\
+             label=r'ROC (AUC = %0.2f )' % (roc_auc), lw=  2, alpha = 1)
+
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC')
+    plt.legend(loc = "lower right")
+    plt.show()
+
+#Plot the ROC curve using the Logit model and final_reduced columns
+draw_test_ROC(LogisticRegression(solver = 'lbfgs'), X_reduced_final, y_reduced, X_test_red, y_test)
+
+#Plot the ROC curve using the LDA model and final_reduced columns
+draw_test_ROC(LinearDiscriminantAnalysis(), X_reduced_final, y_reduced, X_test_red, y_test)
+
+#Plot the ROC curve using the 5-NN model and final_reduced columns
+draw_test_ROC(KNeighborsClassifier(n_neighbors = neigh), X_reduced_final, y_reduced, X_test_red, y_test)
+
+REFERENCES
+James, G., Witten, D., Hastie, T. and Tibshirani, R. (2013). An Introduction to Statistical Learning. New York, NY: Springer New York.
+DATAI Group, Smith, J (No Data) ROC Curve with k-Fold CV (No version) [Source code]. https://www.kaggle.com/kanncaa1/roc-curve-with-k-fold-cv 
+Altini, M. (2015). Dealing with imbalanced data: undersampling, oversampling and proper cross-validation. [online] Marco Altini. Available at: https://www.marcoaltini.com/blog/dealing-with-imbalanced-data-undersampling-oversampling-and-proper-cross-validation [Accessed 12 Feb. 2019]. 
